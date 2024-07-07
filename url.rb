@@ -10,14 +10,22 @@ class URL
         url = url.tr("\\", "/")
         # rather than a traditional :// split, use just : for data: urls
         @scheme, url = url.split(":", 2)
-        unless @scheme == 'data'
+        if @scheme == "view-source"
+            @is_source_view = true
+            @scheme, url = url.split(":", 2)
+        else
+            @is_source_view = false
+        end
+        
+        unless @scheme == "data"
             # then we remove the hanging //
             url = url[2..-1]
         end
         
+        
         # we cannot handle most protocols
         # the %w thing is making a list of strings
-        raise "protocol failure" unless %w[http https file data].include? @scheme
+        raise "protocol failure" unless %w[http https file data view-source].include? @scheme
         
         if @scheme == "file"
             @host, @path = url.split("/", 2)
@@ -37,7 +45,6 @@ class URL
                 @host, url = url.split("/", 2)
                 
                 @path = "/" + url
-                puts @path
             else
                 # handles the case when there's no path - ie when top-level domain
                 @host = url
@@ -112,12 +119,11 @@ class URL
             response_headers = {}
             headers.each_line do |line|
                 header, value = line.split(":", 2)
-                # check that they both exist
-                if header && value
-                    response_headers[header.downcase.strip] = value.strip
-                else
-                    puts "Malformed header: #{header.strip}"
-                end
+                
+                # check that they both exist, if not raise
+                raise "Malformed header: #{header.strip}" unless header && value
+                
+                response_headers[header.downcase.strip] = value.strip
             end
             
             raise "compressed issue" if response_headers.key?("transfer-encoding")
@@ -136,27 +142,34 @@ class URL
         request + "\r\n"
     end
     
-    attr_accessor :scheme, :host, :path, :port, :version, :body, :headers
+    attr_accessor :scheme, :host, :path, :port, :version, :body, :headers, :is_source_view
 end
 
-def show(body)
+def show(body, view_source=false)
     in_tag = false
     
+    body = CGI::unescapeHTML(body)
+    
     body.split("").each do |char|
-        # prints only text outside tag brackets
-        if char == "<"
-            in_tag = true
-        elsif char == ">"
-            in_tag = false
-        elsif not in_tag
+        if view_source
             print char
+        else
+            # prints only text outside tag brackets
+            if char == "<"
+                in_tag = true
+            elsif char == ">"
+                in_tag = false
+            elsif not in_tag
+                print char
+            end
         end
     end
 end
 
 def load_url(url)
     url.request
-    show(url.body)
+    show(url.body, url.is_source_view)
 end
 
-load_url URL.new(ARGV.first)
+url = "view-source:https://example.org/"
+load_url URL.new(url)
