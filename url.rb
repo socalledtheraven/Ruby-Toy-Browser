@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 require 'socket'
 require 'openssl'
+require 'base64'
+require "cgi"
 
 class URL
     def initialize(url)
@@ -8,16 +10,29 @@ class URL
         url = url.tr("\\", "/")
         # rather than a traditional :// split, use just : for data: urls
         @scheme, url = url.split(":", 2)
-        # then we remove the hanging //
-        url = url[2..-1]
+        unless @scheme == 'data'
+            # then we remove the hanging //
+            url = url[2..-1]
+        end
         
         # we cannot handle most protocols
         # the %w thing is making a list of strings
-        raise "protocol failure" unless %w[http https file].include? @scheme
+        raise "protocol failure" unless %w[http https file data].include? @scheme
         
         if @scheme == "file"
             @host, @path = url.split("/", 2)
-        else
+        elsif @scheme == "data"
+            @type, @content = url.split(",", 2)
+            
+            # sometimes doesn't include typing
+            if @type.include? "/"
+                @type, @subtype = @type.split("/", 2)
+                
+                if @subtype.include? ";"
+                    @subtype, @format = @subtype.split(";", 2)
+                end
+            end
+        elsif @scheme == "http" || @scheme == "https"
             if url.include?("/")
                 @host, url = url.split("/", 2)
                 
@@ -49,7 +64,19 @@ class URL
             f = File.open(@path, "r")
             
             @body = f.read
-        else
+            f.close
+        elsif @scheme == "data"
+            # we cannot currently support anything more complicated
+            if @type == "text" || @type == ""
+                # not sure about any other formats
+                if @format == "base64"
+                    @content = Base64.decode64(@content)
+                end
+                
+                # control for %20 etc
+                @body = CGI::unescape(@content)
+            end
+        elsif @scheme == "http" || @scheme == "https"
             # create socket with appropriate port
             socket = TCPSocket.open(@host, @port)
             
