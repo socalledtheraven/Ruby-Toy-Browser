@@ -5,6 +5,8 @@ require 'base64'
 require "cgi"
 
 class URL
+    @@timeout = 20
+    
     def initialize(url)
         # normalise \
         url = url.tr("\\", "/")
@@ -30,6 +32,8 @@ class URL
         if @scheme == "file"
             @host, @path = url.split("/", 2)
         elsif @scheme == "data"
+            @host = "localhost"
+            @port = 8000
             @type, @content = url.split(",", 2)
             
             # sometimes doesn't include typing
@@ -95,39 +99,44 @@ class URL
             end
             
             # create request with headers
+            # remove connection header for keep-alive
             headers = {
               Host: @host,
-              Connection: "close",
+              Connection: "keep-alive",
+              "Keep-Alive": @@timeout,
               "User-Agent": "toy_ruby_web_browser",
             }
             request = build_request(headers)
             
             # send and recieve
             socket.print(request)
-            response = socket.read
-            socket.close
             
             # status information is on first line of response, so nabbbed
-            status = response.split("\r\n").first
+            status = socket.readline("\r\n")
             version, status_code, explanation = status.split(" ", 3)
             
-            headers, @body = response.split("\r\n\r\n", 2)
-            
-            # cut off the first line
-            headers = headers.lines[1..-1].join
-            
             response_headers = {}
-            headers.each_line do |line|
+            line = socket.readline("\r\n")
+            while line != "\r\n"
                 header, value = line.split(":", 2)
                 
                 # check that they both exist, if not raise
                 raise "Malformed header: #{header.strip}" unless header && value
                 
                 response_headers[header.downcase.strip] = value.strip
+                line = socket.readline("\r\n")
             end
             
             raise "compressed issue" if response_headers.key?("transfer-encoding")
             raise "compressed issue" if response_headers.key?("content-encoding")
+            
+            length = response_headers["content-length"].to_i
+            
+            @body = read_socket_data(socket, length)
+            
+            if response_headers["connection"] != "Keep-Alive"
+                socket.close
+            end
         end
     end
     
@@ -142,34 +151,21 @@ class URL
         request + "\r\n"
     end
     
+    def read_socket_data(socket, length)
+        data = ""
+        bytes_read = 0
+        
+        while bytes_read < length
+            chunk = socket.read(length - bytes_read)
+            if chunk == "\r\n"
+                break
+            end
+            data += chunk
+            bytes_read += chunk.length
+        end
+        
+        data
+    end
+    
     attr_accessor :scheme, :host, :path, :port, :version, :body, :headers, :is_source_view
 end
-
-def show(body, view_source=false)
-    in_tag = false
-    
-    body = CGI::unescapeHTML(body)
-    
-    body.split("").each do |char|
-        if view_source
-            print char
-        else
-            # prints only text outside tag brackets
-            if char == "<"
-                in_tag = true
-            elsif char == ">"
-                in_tag = false
-            elsif not in_tag
-                print char
-            end
-        end
-    end
-end
-
-def load_url(url)
-    url.request
-    show(url.body, url.is_source_view)
-end
-
-url = "view-source:https://example.org/"
-load_url URL.new(url)
