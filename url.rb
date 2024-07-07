@@ -45,13 +45,10 @@ class URL
     
     def request
         if @scheme == "file"
-            if @host.nil? || @host.empty?
-                f = File.open(@path, "r")
-                
-                @body = f.read
-            else
-                # nothing goes here, because I have no idea how to access network locations
-            end
+            # this may or may not work for network files, I have no way of testing it
+            f = File.open(@path, "r")
+            
+            @body = f.read
         else
             # create socket with appropriate port
             socket = TCPSocket.open(@host, @port)
