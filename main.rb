@@ -23,10 +23,14 @@ def show(body, view_source=false)
 end
 
 def load_url(url)
-    url.request
-    show(url.body, url.is_source_view)
+    body = url.request
+    show(body, url.is_source_view)
 end
 
-url = "view-source:https://example.org/"
-url_obj = URL.new(url)
-load_url url_obj
+#
+
+urls = %w[http://example.org/ https://example.org/ file:///C:/Users/tomda/Documents/Code/Ruby/Browser/main.rb data:text/html,Hello%20world! data:text/plain;base64,SGVsbG8sIFdvcmxkIQ== data:text/html,%3Ch1%3EHello%2C%20World%21%3C%2Fh1%3E view-source:https://example.org/ https://browser.engineering/redirect https://browser.engineering/redirect3]
+urls.each do |url|
+    url_obj = URL.new(url)
+    load_url url_obj
+end

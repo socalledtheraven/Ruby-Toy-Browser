@@ -2,16 +2,27 @@
 require 'socket'
 require 'openssl'
 require 'base64'
-require "cgi"
+require 'cgi'
 
 class URL
-    @@timeout = 20
+    @timeout = 20
     
-    def initialize(url)
+    def initialize(url, is_source_view = false, redirects = 5, old_url = "")
+        @redirects = redirects
+        
+        # handle the weirdness of redirects sometimes doing
+        if redirects < 5 && url[0] == "/"
+            url = old_url + url
+        end
+        puts "creating URL #{url}"
+        
         # normalise \
         url = url.tr("\\", "/")
+        
         # rather than a traditional :// split, use just : for data: urls
         @scheme, url = url.split(":", 2)
+        
+        # handles when source view (can be handled recursively)
         if @scheme == "view-source"
             @is_source_view = true
             @scheme, url = url.split(":", 2)
@@ -19,15 +30,16 @@ class URL
             @is_source_view = false
         end
         
+        # the other part of the data: urls
         unless @scheme == "data"
             # then we remove the hanging //
             url = url[2..-1]
         end
         
-        
         # we cannot handle most protocols
         # the %w thing is making a list of strings
         raise "protocol failure" unless %w[http https file data view-source].include? @scheme
+        
         
         if @scheme == "file"
             @host, @path = url.split("/", 2)
@@ -44,6 +56,7 @@ class URL
                     @subtype, @format = @subtype.split(";", 2)
                 end
             end
+            
         elsif @scheme == "http" || @scheme == "https"
             if url.include?("/")
                 @host, url = url.split("/", 2)
@@ -68,14 +81,15 @@ class URL
         end
     end
     
-    
     def request
         if @scheme == "file"
             # this may or may not work for network files, I have no way of testing it
             f = File.open(@path, "r")
             
-            @body = f.read
+            body = f.read
             f.close
+            
+            body
         elsif @scheme == "data"
             # we cannot currently support anything more complicated
             if @type == "text" || @type == ""
@@ -85,26 +99,18 @@ class URL
                 end
                 
                 # control for %20 etc
-                @body = CGI::unescape(@content)
+                CGI::unescape(@content)
             end
         elsif @scheme == "http" || @scheme == "https"
             # create socket with appropriate port
-            socket = TCPSocket.open(@host, @port)
-            
-            # only redefine if I need it for https
-            if @scheme == "https"
-                ssl_context = OpenSSL::SSL::SSLContext.new
-                socket = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
-                socket.connect
-            end
+            socket = create_socket
             
             # create request with headers
-            # remove connection header for keep-alive
             headers = {
-              Host: @host,
-              Connection: "keep-alive",
-              "Keep-Alive": @@timeout,
-              "User-Agent": "toy_ruby_web_browser",
+                Host: @host,
+                Connection: "keep-alive",
+                "Keep-Alive": @Timeout,
+                "User-Agent": "toy_ruby_web_browser",
             }
             request = build_request(headers)
             
@@ -127,17 +133,29 @@ class URL
                 line = socket.readline("\r\n")
             end
             
+            if status_code[0] == "3" && @redirects > 0
+                @redirects -= 1
+                puts "redirects left: #{@redirects}"
+                new_url = response_headers["location"].strip
+                
+                new_url_obj = URL.new(new_url, @is_source_view, @redirects, @scheme + "://" + host)
+                
+                return new_url_obj.request
+            end
+            
             raise "compressed issue" if response_headers.key?("transfer-encoding")
             raise "compressed issue" if response_headers.key?("content-encoding")
             
             length = response_headers["content-length"].to_i
             
-            @body = read_socket_data(socket, length)
+            body = read_socket_data(socket, length)
             
             if response_headers["connection"] != "Keep-Alive"
                 socket.close
             end
-        end
+            
+            body
+            end
     end
     
     def build_request(headers)
@@ -167,5 +185,18 @@ class URL
         data
     end
     
-    attr_accessor :scheme, :host, :path, :port, :version, :body, :headers, :is_source_view
+    def create_socket
+        socket = TCPSocket.open(@host, @port)
+        
+        # only redefine if I need it for https
+        if @scheme == "https"
+            ssl_context = OpenSSL::SSL::SSLContext.new
+            socket = OpenSSL::SSL::SSLSocket.new(socket, ssl_context)
+            socket.connect
+        end
+        
+        socket
+    end
+    
+    attr_accessor :scheme, :host, :path, :port, :is_source_view
 end
