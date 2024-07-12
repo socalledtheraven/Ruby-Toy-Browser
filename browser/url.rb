@@ -3,6 +3,8 @@ require 'socket'
 require 'openssl'
 require 'base64'
 require 'cgi'
+require 'json'
+require 'fileutils'
 
 class URL
     @timeout = 20
@@ -23,11 +25,15 @@ class URL
         @scheme, url = url.split(":", 2)
         
         # handles when source view (can be handled recursively)
-        if @scheme == "view-source"
+        if is_source_view
             @is_source_view = true
-            @scheme, url = url.split(":", 2)
         else
-            @is_source_view = false
+            if @scheme == "view-source"
+                @is_source_view = true
+                @scheme, url = url.split(":", 2)
+            else
+                @is_source_view = false
+            end
         end
         
         # the other part of the data: urls
@@ -40,9 +46,9 @@ class URL
         # the %w thing is making a list of strings
         raise "protocol failure" unless %w[http https file data view-source].include? @scheme
         
-        
         if @scheme == "file"
             @host, @path = url.split("/", 2)
+            
         elsif @scheme == "data"
             @host = "localhost"
             @port = 8000
@@ -60,7 +66,6 @@ class URL
         elsif @scheme == "http" || @scheme == "https"
             if url.include?("/")
                 @host, url = url.split("/", 2)
-                
                 @path = "/" + url
             else
                 # handles the case when there's no path - ie when top-level domain
@@ -82,14 +87,38 @@ class URL
     end
     
     def request
+        # general idea is to have a cache folder which contains all the things and then a folder for each webpage
+        # in the folder we have the html as well as the headers and all other info in a metadata.json
+        
+        # there's no real point in caching anything besides actual web requests
+        if @scheme == "http" || @scheme == "https"
+            # folder_path is the path for the folder, so mkdir can work
+            @folder_path = "cache/" + @scheme + "/" + @host
+            @file_path = @folder_path + @path
+            if @path == "/"
+                @file_path << "_"
+            end
+            
+            if File.exist?(@file_path + ".html")
+                puts "cached file exists, fetching from #{@file_path}.html"
+                cached_req_metadata = JSON.load_file(@file_path + ".json")
+                
+                if cached_req_metadata.key?("cache-control")
+                    # checks if cache is within time limit
+                    if cached_req_metadata["cache-control"].split("=")[1].to_i > (Time.now.to_i - cached_req_metadata["unix"])
+                        puts "read from cache!"
+                        cached_req = File.read(@file_path + ".html")
+                        return cached_req
+                    else
+                        puts "cache expired, falling back to new request"
+                    end
+                end
+            end
+        end
+        
         if @scheme == "file"
             # this may or may not work for network files, I have no way of testing it
-            f = File.open(@path, "r")
-            
-            body = f.read
-            f.close
-            
-            body
+            File.read(@path)
         elsif @scheme == "data"
             # we cannot currently support anything more complicated
             if @type == "text" || @type == ""
@@ -109,7 +138,7 @@ class URL
             headers = {
                 Host: @host,
                 Connection: "keep-alive",
-                "Keep-Alive": @Timeout,
+                "Keep-Alive": @timeout,
                 "User-Agent": "toy_ruby_web_browser",
             }
             request = build_request(headers)
@@ -133,12 +162,15 @@ class URL
                 line = socket.readline("\r\n")
             end
             
-            if status_code[0] == "3" && @redirects > 0
+            if status_code[0] == "3"
                 @redirects -= 1
+                
+                raise "Too many redirects" unless @redirects > 0
+                
                 puts "redirects left: #{@redirects}"
                 new_url = response_headers["location"].strip
                 
-                new_url_obj = URL.new(new_url, @is_source_view, @redirects, @scheme + "://" + host)
+                new_url_obj = URL.new(new_url, is_source_view, @redirects, @scheme + "://" + host)
                 
                 return new_url_obj.request
             end
@@ -154,8 +186,22 @@ class URL
                 socket.close
             end
             
-            body
+            if response_headers["cache-control"] != "no-store"
+                # full file saving business
+                response_headers["unix"] = Time.now.to_i
+                # makes the folder if it doesn't exist, does nothing otherwise
+                FileUtils.mkdir_p(@folder_path)
+                File.open(@file_path + ".json", "w+") do |f|
+                    f.write(JSON.pretty_generate(response_headers))
+                end
+                File.open(@file_path + ".html", "w+") do |f|
+                    f.write(body.to_s)
+                end
+                puts "saved file"
             end
+            
+            body
+        end
     end
     
     def build_request(headers)
