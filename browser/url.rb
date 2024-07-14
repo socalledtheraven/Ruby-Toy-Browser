@@ -5,6 +5,8 @@ require 'base64'
 require 'cgi'
 require 'json'
 require 'fileutils'
+require 'zlib'
+require 'stringio'
 
 class URL
     @timeout = 20
@@ -100,25 +102,15 @@ class URL
             end
             
             if File.exist?(@file_path + ".html")
-                puts "cached file exists, fetching from #{@file_path}.html"
-                cached_req_metadata = JSON.load_file(@file_path + ".json")
-                
-                if cached_req_metadata.key?("cache-control")
-                    # checks if cache is within time limit
-                    if cached_req_metadata["cache-control"].split("=")[1].to_i > (Time.now.to_i - cached_req_metadata["unix"])
-                        puts "read from cache!"
-                        cached_req = File.read(@file_path + ".html")
-                        return cached_req
-                    else
-                        puts "cache expired, falling back to new request"
-                    end
-                end
+                cache = cache_handling
+                return cache if cache
             end
         end
         
         if @scheme == "file"
             # this may or may not work for network files, I have no way of testing it
             File.read(@path)
+            
         elsif @scheme == "data"
             # we cannot currently support anything more complicated
             if @type == "text" || @type == ""
@@ -130,6 +122,7 @@ class URL
                 # control for %20 etc
                 CGI::unescape(@content)
             end
+            
         elsif @scheme == "http" || @scheme == "https"
             # create socket with appropriate port
             socket = create_socket
@@ -140,6 +133,7 @@ class URL
                 Connection: "keep-alive",
                 "Keep-Alive": @timeout,
                 "User-Agent": "toy_ruby_web_browser",
+                "Accept-Encoding": "gzip",
             }
             request = build_request(headers)
             
@@ -150,54 +144,46 @@ class URL
             status = socket.readline("\r\n")
             version, status_code, explanation = status.split(" ", 3)
             
-            response_headers = {}
-            line = socket.readline("\r\n")
-            while line != "\r\n"
-                header, value = line.split(":", 2)
-                
-                # check that they both exist, if not raise
-                raise "Malformed header: #{header.strip}" unless header && value
-                
-                response_headers[header.downcase.strip] = value.strip
-                line = socket.readline("\r\n")
-            end
+            # parse headers
+            response_headers = parse_headers(socket)
             
+            # redirect handling
             if status_code[0] == "3"
                 @redirects -= 1
-                
                 raise "Too many redirects" unless @redirects > 0
-                
                 puts "redirects left: #{@redirects}"
+                
                 new_url = response_headers["location"].strip
-                
                 new_url_obj = URL.new(new_url, is_source_view, @redirects, @scheme + "://" + host)
-                
                 return new_url_obj.request
             end
             
-            raise "compressed issue" if response_headers.key?("transfer-encoding")
-            raise "compressed issue" if response_headers.key?("content-encoding")
+            # finish reading
+            if response_headers["transfer-encoding"] == "chunked"
+                data = read_chunked_socket_data(socket)
+            else
+                length = response_headers["content-length"].to_i
+                puts response_headers
+                data = read_socket_data(socket, length)
+            end
             
-            length = response_headers["content-length"].to_i
-            
-            body = read_socket_data(socket, length)
+            if response_headers["content-encoding"] == "gzip"
+                puts "gzipped data"
+                
+                body = Zlib::GzipReader.new(StringIO.new(data.to_s)).read
+            else
+                body = data
+            end
             
             if response_headers["connection"] != "Keep-Alive"
                 socket.close
             end
             
-            if response_headers["cache-control"] != "no-store"
-                # full file saving business
-                response_headers["unix"] = Time.now.to_i
-                # makes the folder if it doesn't exist, does nothing otherwise
-                FileUtils.mkdir_p(@folder_path)
-                File.open(@file_path + ".json", "w+") do |f|
-                    f.write(JSON.pretty_generate(response_headers))
+            # only caches if allowed and a successful or permanent thing
+            if response_headers.key?("cache-control")
+                if response_headers["cache-control"] != "no-store" && [200, 301, 404].include?(status_code.to_i)
+                    cache_request(response_headers, body)
                 end
-                File.open(@file_path + ".html", "w+") do |f|
-                    f.write(body.to_s)
-                end
-                puts "saved file"
             end
             
             body
@@ -231,6 +217,21 @@ class URL
         data
     end
     
+    def read_chunked_socket_data(socket)
+        puts "reading chunked data"
+        data = ""
+        line = socket.readline("\r\n")
+        next_line = socket.readline("\r\n")
+        # take lines 2 at a time, because each chunk has a line for its length
+        while line != "0\r\n"
+            data += next_line
+            line = socket.readline("\r\n")
+            next_line = socket.readline("\r\n")
+        end
+        
+        data
+    end
+    
     def create_socket
         socket = TCPSocket.open(@host, @port)
         
@@ -242,6 +243,52 @@ class URL
         end
         
         socket
+    end
+    
+    def cache_handling
+        puts "cached file exists, fetching from #{@file_path}.html"
+        cached_req_metadata = JSON.load_file(@file_path + ".json")
+        
+        if cached_req_metadata.key?("cache-control")
+            # checks if cache is within time limit
+            if cached_req_metadata["cache-control"].split("=")[1].to_i > (Time.now.to_i - cached_req_metadata["unix"])
+                puts "read from cache!"
+                cached_req = File.read(@file_path + ".html")
+                return cached_req
+            else
+                puts "cache expired, falling back to new request"
+            end
+        end
+    end
+    
+    def parse_headers(socket)
+        response_headers = {}
+        line = socket.readline("\r\n")
+        while line != "\r\n"
+            header, value = line.split(":", 2)
+            
+            # check that they both exist, if not raise
+            raise "Malformed header: #{header.strip}" unless header && value
+            
+            response_headers[header.downcase.strip] = value.strip
+            line = socket.readline("\r\n")
+        end
+        
+        response_headers
+    end
+    
+    def cache_request(response_headers, body)
+        # full file saving business
+        response_headers["unix"] = Time.now.to_i
+        # makes the folder if it doesn't exist, does nothing otherwise
+        FileUtils.mkdir_p(@folder_path)
+        File.open(@file_path + ".json", "w+") do |f|
+            f.write(JSON.pretty_generate(response_headers))
+        end
+        File.open(@file_path + ".html", "w+") do |f|
+            f.write(body.to_s)
+        end
+        puts "saved file"
     end
     
     attr_accessor :scheme, :host, :path, :port, :is_source_view

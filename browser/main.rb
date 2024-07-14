@@ -6,9 +6,11 @@ def show(body, view_source=false)
     
     body = CGI::unescapeHTML(body)
     
+    # TODO: change this back when I need to output properly
     body.split("").each do |char|
         if view_source
-            print char
+            # print char
+            print ""
         else
             # prints only text outside tag brackets
             if char == "<"
@@ -16,7 +18,8 @@ def show(body, view_source=false)
             elsif char == ">"
                 in_tag = false
             elsif not in_tag
-                print char
+                # print char
+                print ""
             end
         end
     end
@@ -39,7 +42,7 @@ end
 
 #
 
-urls = %w[http://example.org/ https://example.org/ file:///C:/Users/tomda/Documents/Code/Ruby/Browser/browser/main.rb data:text/html,Hello%20world! data:text/plain;base64,SGVsbG8sIFdvcmxkIQ== data:text/html,%3Ch1%3EHello%2C%20World%21%3C%2Fh1%3E view-source:https://example.org/ https://browser.engineering/redirect https://browser.engineering/redirect3]
+urls = %w[http://example.org/ https://example.org/ file:///C:/Users/tomda/Documents/Code/Ruby/Browser/browser/main.rb data:text/html,Hello%20world! data:text/plain;base64,SGVsbG8sIFdvcmxkIQ== data:text/html,%3Ch1%3EHello%2C%20World%21%3C%2Fh1%3E view-source:https://example.org/ https://browser.engineering/redirect https://browser.engineering/redirect3 https://browser.engineering/exercises.html ]
 urls.each do |url|
     url_obj = URL.new(url)
     load_url url_obj
